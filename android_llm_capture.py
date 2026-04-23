@@ -1,210 +1,287 @@
+#!/usr/bin/env python3
 """
-android_llm_capture: Capture and replay LLM API calls from Android applications via ADB.
+android_llm_capture.py — Android LLM Network Traffic Capture
+Parses Android logcat output to intercept and replay LLM API calls.
+Stdlib-only. No external dependencies.
+"""
 
-Uses Android Debug Bridge (ADB) logcat stream parsing to intercept, record, and replay
-HTTP requests made by LLM SDKs running inside Android apps without requiring root or
-app modification.
-"""
 from __future__ import annotations
-import re, json, subprocess, threading, time, hashlib, datetime
+
+import argparse
+import hashlib
+import json
+import re
+import subprocess
+import sys
+import time
+import urllib.request
+from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
+
 LLM_PATTERNS: Dict[str, re.Pattern] = {
-    "openai":     re.compile(r"https://api\.openai\.com/v\d+/(chat/completions|completions|embeddings)"),
-    "anthropic":  re.compile(r"https://api\.anthropic\.com/v\d+/messages"),
-    "cohere":     re.compile(r"https://api\.cohere\.ai/v\d+/generate"),
-    "huggingface":re.compile(r"https://api-inference\.huggingface\.co/models/"),
-    "palm":       re.compile(r"https://generativelanguage\.googleapis\.com"),
-    "azure_oai":  re.compile(r"https://[^.]+\.openai\.azure\.com/openai/deployments/"),
+    "openai":      re.compile(r'api\.openai\.com/v1/', re.IGNORECASE),
+    "anthropic":   re.compile(r'api\.anthropic\.com/', re.IGNORECASE),
+    "google":      re.compile(r'generativelanguage\.googleapis\.com/', re.IGNORECASE),
+    "cohere":      re.compile(r'api\.cohere\.ai/', re.IGNORECASE),
+    "mistral":     re.compile(r'api\.mistral\.ai/', re.IGNORECASE),
+    "together":    re.compile(r'api\.together\.ai/', re.IGNORECASE),
+    "huggingface": re.compile(r'api-inference\.huggingface\.co/', re.IGNORECASE),
+    "groq":        re.compile(r'api\.groq\.com/', re.IGNORECASE),
 }
 
-LOGCAT_TAGS = ["OkHttp", "Retrofit", "HttpLogging", "NetworkInterceptor",
-               "Volley", "AndroidHttpClient"]
+_OKHTTP_REQUEST  = re.compile(r'--> (?P<method>POST|GET|PUT|PATCH) (?P<url>https?://\S+)')
+_OKHTTP_RESPONSE = re.compile(r'<-- (?P<status>\d{3}) .* (?P<url>https?://\S+)')
+_OKHTTP_BODY     = re.compile(r'(?P<body>\{.*\}|\[.*\])')
+_CRONET_URL      = re.compile(r'(?:CronetEngine|Cronet)\s*(?:request|url):\s*(?P<url>https?://\S+)', re.IGNORECASE)
 
-class CapturedCall:
-    """A single captured LLM API interaction."""
-    def __init__(self, provider, url, method, request_body, response_body,
-                 timestamp=None, package=""):
-        self.provider = provider
-        self.url = url
-        self.method = method.upper()
-        self.request_body = request_body
-        self.response_body = response_body
-        self.timestamp = timestamp or datetime.datetime.utcnow().isoformat()
-        self.package = package
-        self.call_id = hashlib.sha256(
-            f"{self.timestamp}{self.url}{self.request_body}".encode()
-        ).hexdigest()[:16]
 
-    def request_json(self):
-        try:
-            return json.loads(self.request_body) if self.request_body else None
-        except json.JSONDecodeError:
-            return None
-
-    def response_json(self):
-        try:
-            return json.loads(self.response_body) if self.response_body else None
-        except json.JSONDecodeError:
-            return None
-
-    def to_dict(self):
-        return {
-            "call_id": self.call_id, "provider": self.provider,
-            "url": self.url, "method": self.method,
-            "package": self.package, "timestamp": self.timestamp,
-            "request_body": self.request_body, "response_body": self.response_body,
-        }
-
-def _adb(*args, device=None):
-    cmd = ["adb"] + (["-s", device] if device else []) + list(args)
-    return subprocess.run(cmd, capture_output=True, text=True)
-
-def list_devices():
-    result = _adb("devices")
-    return [l.split()[0] for l in result.stdout.splitlines()[1:] if l.split()[1:] == ["device"]]
-
-def list_packages(device=None):
-    r = _adb("shell", "pm", "list", "packages", device=device)
-    return [l.replace("package:", "").strip() for l in r.stdout.splitlines() if l.startswith("package:")]
-
-def get_device_model(device=None):
-    return _adb("shell", "getprop", "ro.product.model", device=device).stdout.strip()
-
-_URL_RE = re.compile(r"(https?://\S+)")
-_JSON_RE = re.compile(r"(\{.*\}|\[.*\])")
-
-def _detect_provider(url):
-    for name, pattern in LLM_PATTERNS.items():
+def _detect_provider(url: str) -> Optional[str]:
+    for provider, pattern in LLM_PATTERNS.items():
         if pattern.search(url):
-            return name
-    return "unknown"
+            return provider
+    return None
 
-def _parse_logcat_line(line):
-    url_match = _URL_RE.search(line)
-    if not url_match:
+
+def _sha256(data: str) -> str:
+    return hashlib.sha256(data.encode()).hexdigest()
+
+
+@dataclass
+class CapturedCall:
+    call_id: str
+    timestamp: float
+    provider: str
+    url: str
+    method: str
+    request_body: Optional[Dict[str, Any]]
+    response_status: Optional[int]
+    response_body: Optional[str]
+    source: str
+    request_hash: str = field(init=False)
+    response_hash: str = field(init=False)
+
+    def __post_init__(self):
+        req_str = json.dumps(self.request_body, sort_keys=True) if self.request_body else ""
+        self.request_hash  = _sha256(req_str)
+        self.response_hash = _sha256(self.response_body or "")
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    def to_jsonl(self) -> str:
+        return json.dumps(self.to_dict(), ensure_ascii=False)
+
+    @property
+    def model(self) -> Optional[str]:
+        return self.request_body.get("model") if self.request_body else None
+
+    @property
+    def prompt_tokens_estimate(self) -> int:
+        if not self.request_body:
+            return 0
+        msgs = self.request_body.get("messages", [])
+        text = " ".join(m.get("content","") for m in msgs if isinstance(m,dict))
+        return max(1, len(text.split())*4//3)
+
+
+def parse_logcat_line(line: str, state: Dict) -> Optional[CapturedCall]:
+    line = line.strip()
+    if not line:
         return None
-    url = url_match.group(1).rstrip(")")
-    provider = _detect_provider(url)
-    if provider == "unknown":
+    m = _OKHTTP_REQUEST.search(line)
+    if m:
+        url = m.group("url")
+        provider = _detect_provider(url)
+        if provider:
+            state.update({"url":url,"method":m.group("method"),"provider":provider,
+                          "body_lines":[],"phase":"request"})
         return None
-    method = "POST"
-    for m in ("GET", "POST", "PUT", "DELETE", "PATCH"):
-        if f"--> {m}" in line:
-            method = m
-            break
-    body_match = _JSON_RE.search(line)
-    body = body_match.group(0) if body_match else None
-    direction = "request" if "-->" in line else "response" if "<--" in line else "unknown"
-    return {"url": url, "provider": provider, "method": method,
-            "body": body, "direction": direction}
+    if state.get("phase")=="request" and state.get("url"):
+        mb = _OKHTTP_BODY.search(line)
+        if mb:
+            state["body_lines"].append(mb.group("body"))
+        return None
+    mr = _OKHTTP_RESPONSE.search(line)
+    if mr and state.get("url"):
+        state["response_status"] = int(mr.group("status"))
+        state["phase"] = "response"
+        return None
+    if state.get("phase")=="response":
+        mb = _OKHTTP_BODY.search(line)
+        if mb:
+            raw = mb.group("body")
+            call = _finalise_call(state, raw)
+            state.clear()
+            return call
+    mc = _CRONET_URL.search(line)
+    if mc:
+        url = mc.group("url")
+        provider = _detect_provider(url)
+        if provider:
+            state.update({"url":url,"method":"POST","provider":provider,"body_lines":[],"phase":"request"})
+    return None
 
-class LLMCapture:
-    """Captures LLM API calls from an Android device via ADB logcat."""
-    def __init__(self, device=None, output_path=None, providers=None):
-        self.device = device
-        self.output_path = Path(output_path) if output_path else None
-        self.providers = set(providers) if providers else set(LLM_PATTERNS.keys())
-        self._calls = []
-        self._lock = threading.Lock()
-        self._stop_event = threading.Event()
 
-    def _stream_logcat(self):
-        tag_args = []
-        for tag in LOGCAT_TAGS:
-            tag_args += ["-s", f"{tag}:D"]
-        cmd = ["adb"] + (["-s", self.device] if self.device else [])
-        cmd += ["logcat", "-v", "brief"] + tag_args
-        with subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True, errors="replace") as proc:
-            for line in proc.stdout:
-                if self._stop_event.is_set():
-                    proc.terminate()
-                    break
-                yield line.rstrip()
-
-    def _process_lines(self):
-        pending = {}
-        for line in self._stream_logcat():
-            parsed = _parse_logcat_line(line)
-            if not parsed:
-                continue
-            url = parsed["url"]
-            if parsed["direction"] == "request":
-                pending[url] = {
-                    "provider": parsed["provider"], "url": url,
-                    "method": parsed["method"], "request_body": parsed["body"],
-                    "timestamp": datetime.datetime.utcnow().isoformat(),
-                }
-            elif parsed["direction"] == "response" and url in pending:
-                entry = pending.pop(url)
-                call = CapturedCall(
-                    provider=entry["provider"], url=entry["url"],
-                    method=entry["method"], request_body=entry.get("request_body"),
-                    response_body=parsed["body"], timestamp=entry["timestamp"],
-                )
-                with self._lock:
-                    self._calls.append(call)
-                    if self.output_path:
-                        with self.output_path.open("a") as f:
-                            f.write(json.dumps(call.to_dict()) + "\n")
-
-    def capture(self, duration=60.0):
-        """Stream logcat for duration seconds and return captured calls."""
-        self._stop_event.clear()
-        self._calls = []
-        t = threading.Thread(target=self._process_lines, daemon=True)
-        t.start()
-        time.sleep(duration)
-        self._stop_event.set()
-        t.join(timeout=5)
-        return list(self._calls)
-
-    def stop(self):
-        self._stop_event.set()
-        return list(self._calls)
-
-    def __enter__(self): return self
-    def __exit__(self, *_): self.stop()
-
-def replay_call(call, token, timeout=30.0):
-    """Re-issue a captured LLM API call using the stored request body."""
-    import urllib.request
-    if not call.request_body:
-        raise ValueError(f"Call {call.call_id} has no stored request body.")
-    req = urllib.request.Request(
-        url=call.url, data=call.request_body.encode(), method=call.method,
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
+def _finalise_call(state: Dict, response_body: Optional[str]) -> CapturedCall:
+    body_json = None
+    if state.get("body_lines"):
+        try:
+            body_json = json.loads(" ".join(state["body_lines"]))
+        except Exception:
+            pass
+    call_id = _sha256(f"{time.time()}{state.get('url','')}")[:16]
+    return CapturedCall(
+        call_id=call_id, timestamp=time.time(),
+        provider=state.get("provider","unknown"),
+        url=state.get("url",""), method=state.get("method","POST"),
+        request_body=body_json, response_status=state.get("response_status"),
+        response_body=response_body, source="logcat",
     )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read())
-    except Exception as exc:
-        raise RuntimeError(f"Replay failed for {call.call_id}: {exc}") from exc
 
-def _cli():
-    import argparse
-    parser = argparse.ArgumentParser(prog="android-llm-capture",
-        description="Capture LLM API calls from Android apps via ADB logcat.")
-    sub = parser.add_subparsers(dest="cmd")
-    cap_p = sub.add_parser("capture", help="Capture calls for N seconds.")
-    cap_p.add_argument("-d", "--device", default=None)
-    cap_p.add_argument("-t", "--duration", type=float, default=60.0)
-    cap_p.add_argument("-o", "--output", default="captures.jsonl")
-    sub.add_parser("devices", help="List connected ADB devices.")
-    args = parser.parse_args()
-    if args.cmd == "devices":
-        devs = list_devices()
-        print("\n".join(devs) if devs else "No devices connected.")
-    elif args.cmd == "capture":
-        print(f"Capturing for {args.duration}s -> {args.output}")
-        with LLMCapture(device=args.device, output_path=args.output) as cap:
-            calls = cap.capture(duration=args.duration)
-        print(f"Captured {len(calls)} LLM call(s).")
+
+def parse_logcat_file(path: Path) -> List[CapturedCall]:
+    calls = []
+    state: Dict = {}
+    with path.open(encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            result = parse_logcat_line(line, state)
+            if result:
+                result.source = "file"
+                calls.append(result)
+    return calls
+
+
+class CaptureSession:
+    def __init__(self, device_serial: Optional[str] = None, tag_filter: str = "OkHttp"):
+        self.device_serial = device_serial
+        self.tag_filter = tag_filter
+        self.calls: List[CapturedCall] = []
+        self._proc: Optional[subprocess.Popen] = None
+
+    def start(self) -> None:
+        cmd = ["adb"]
+        if self.device_serial:
+            cmd += ["-s", self.device_serial]
+        cmd += ["logcat", "-v", "brief", f"{self.tag_filter}:V", "*:S"]
+        try:
+            self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        except FileNotFoundError:
+            raise RuntimeError("adb not found — ensure Android SDK platform-tools is on PATH.")
+
+    def stop(self) -> None:
+        if self._proc:
+            self._proc.terminate()
+            self._proc = None
+
+    def stream(self) -> Iterator[CapturedCall]:
+        if not self._proc:
+            raise RuntimeError("Call start() before streaming.")
+        state: Dict = {}
+        assert self._proc.stdout is not None
+        for line in self._proc.stdout:
+            result = parse_logcat_line(line, state)
+            if result:
+                self.calls.append(result)
+                yield result
+
+    def export_jsonl(self, path: Path) -> None:
+        with path.open("w", encoding="utf-8") as fh:
+            for call in self.calls:
+                fh.write(call.to_jsonl() + "\n")
+        print(f"Exported {len(self.calls)} calls to {path}")
+
+    def replay(self, call: CapturedCall, api_key: str) -> Dict[str, Any]:
+        if not call.request_body:
+            raise ValueError("No request body to replay.")
+        headers = {"Content-Type": "application/json"}
+        if call.provider == "openai":
+            headers["Authorization"] = f"Bearer {api_key}"
+        elif call.provider == "anthropic":
+            headers["x-api-key"] = api_key
+            headers["anthropic-version"] = "2023-06-01"
+        payload = json.dumps(call.request_body).encode()
+        req = urllib.request.Request(call.url, data=payload, headers=headers, method=call.method)
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read())
+
+
+def _parse_args(argv=None):
+    p = argparse.ArgumentParser(prog="android_llm_capture",
+                                description="Capture and replay Android LLM API calls.")
+    sub = p.add_subparsers(dest="command")
+    live_p = sub.add_parser("live", help="Stream live logcat and capture LLM calls.")
+    live_p.add_argument("--serial", default=None)
+    live_p.add_argument("--tag", default="OkHttp")
+    live_p.add_argument("--output", "-o", default="captures.jsonl")
+    live_p.add_argument("--timeout", type=int, default=0)
+    file_p = sub.add_parser("file", help="Parse a saved logcat file.")
+    file_p.add_argument("logcat")
+    file_p.add_argument("--output", "-o", default="captures.jsonl")
+    file_p.add_argument("--json", action="store_true")
+    replay_p = sub.add_parser("replay", help="Replay a captured call.")
+    replay_p.add_argument("captures")
+    replay_p.add_argument("call_id")
+    replay_p.add_argument("--api-key", required=True)
+    stats_p = sub.add_parser("stats", help="Show statistics about a captures file.")
+    stats_p.add_argument("captures")
+    return p.parse_args(argv)
+
+
+def main(argv=None) -> int:
+    args = _parse_args(argv)
+    if args.command == "live":
+        session = CaptureSession(device_serial=args.serial, tag_filter=args.tag)
+        print(f"Starting live capture (tag={args.tag}). Press Ctrl-C to stop.")
+        try:
+            session.start()
+            start = time.time()
+            for call in session.stream():
+                print(f"[{call.provider}] {call.method} {call.url[:60]} status={call.response_status}")
+                if args.timeout and (time.time()-start) > args.timeout:
+                    break
+        except KeyboardInterrupt:
+            pass
+        finally:
+            session.stop()
+        session.export_jsonl(Path(args.output))
+        return 0
+    if args.command == "file":
+        path = Path(args.logcat)
+        if not path.is_file():
+            print(f"Error: {path} not found", file=sys.stderr)
+            return 1
+        calls = parse_logcat_file(path)
+        out = Path(args.output)
+        with out.open("w", encoding="utf-8") as fh:
+            if args.json:
+                fh.write(json.dumps([c.to_dict() for c in calls], indent=2, ensure_ascii=False))
+            else:
+                for c in calls:
+                    fh.write(c.to_jsonl() + "\n")
+        print(f"Found {len(calls)} LLM calls → {out}")
+        return 0
+    if args.command == "stats":
+        calls = []
+        with open(args.captures, encoding="utf-8") as fh:
+            for line in fh:
+                line=line.strip()
+                if line:
+                    calls.append(json.loads(line))
+        by_provider: Dict[str,int] = {}
+        by_model: Dict[str,int] = {}
         for c in calls:
-            print(f"  [{c.provider}] {c.method} {c.url} (id={c.call_id})")
-    else:
-        parser.print_help()
+            by_provider[c["provider"]] = by_provider.get(c["provider"],0)+1
+            model = (c.get("request_body") or {}).get("model","unknown")
+            by_model[model] = by_model.get(model,0)+1
+        print(f"Total calls: {len(calls)}")
+        for k,v in sorted(by_provider.items(),key=lambda x:-x[1]):
+            print(f"  {k}: {v}")
+        return 0
+    print("Specify a subcommand: live, file, replay, stats")
+    return 1
+
 
 if __name__ == "__main__":
-    _cli()
+    sys.exit(main())
