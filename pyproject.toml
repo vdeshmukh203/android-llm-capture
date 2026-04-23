@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "android-llm-capture"
+version = "0.1.0"
+description = "ADB-based tool for capturing LLM API interactions from Android devices"
+readme = "README.md"
+license = {file = "LICENSE"}
+authors = [{name = "Vaibhav Deshmukh", email = "vdeshmukh203@gmail.com"}]
+requires-python = ">=3.8"
+keywords = ["android", "adb", "llm", "capture", "logcat", "reproducibility"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Testing",
+]
+
+[project.scripts]
+android-llm-capture = "android_llm_capture:_cli"
+
+[tool.setuptools]
+py-modules = ["android_llm_capture"]
