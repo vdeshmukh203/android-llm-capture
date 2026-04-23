@@ -1,0 +1,13 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+type: software
+title: "android-llm-capture"
+abstract: "ADB-based tool for capturing LLM API interactions from Android devices without code modification"
+authors:
+  - family-names: Deshmukh
+    given-names: V.A.
+    alias: vdeshmukh203
+version: 0.1.0
+date-released: "2025-01-01"
+url: "https://github.com/vdeshmukh203/android-llm-capture"
+license: MIT
