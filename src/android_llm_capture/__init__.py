@@ -1,17 +1,24 @@
 """
-android_llm_capture: ADB-based Android LLM interaction capture tool.
+android_llm_capture — ADB-based Android LLM interaction capture tool.
 
-Uses the Android Debug Bridge (ADB) to intercept and record LLM application
-interactions on Android devices. Captures screen content, clipboard events,
-and accessibility tree snapshots to reconstruct prompt/response pairs from
-on-device LLM apps for reproducible research documentation.
+Re-exports the public API from the top-level module so the package can be
+imported either as ``import android_llm_capture`` (root module) or installed
+as a proper package via ``pip install .``.
 """
 
-__version__ = "0.1.0"
-__author__ = "Vaibhav Deshmukh"
-__license__ = "MIT"
-
-from .capture import AndroidCapture
-from .adb import ADBClient
-
-__all__ = ["AndroidCapture", "ADBClient"]
+from android_llm_capture import (  # noqa: F401  (re-export)
+    __version__,
+    __author__,
+    __license__,
+    __all__,
+    CapturedCall,
+    CaptureSession,
+    LLMCapture,
+    LLM_PATTERNS,
+    parse_logcat_line,
+    parse_logcat_file,
+    load_jsonl,
+    list_devices,
+    list_packages,
+    main,
+)
