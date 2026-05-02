@@ -21,7 +21,15 @@ classifiers = [
 ]
 
 [project.scripts]
-android-llm-capture = "android_llm_capture:_cli"
+android-llm-capture     = "android_llm_capture:main"
+android-llm-capture-gui = "android_llm_capture.gui:launch_gui"
 
 [tool.setuptools]
+# Install both the standalone script module and the src/ package.
 py-modules = ["android_llm_capture"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
