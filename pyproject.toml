@@ -21,7 +21,12 @@ classifiers = [
 ]
 
 [project.scripts]
-android-llm-capture = "android_llm_capture:_cli"
+android-llm-capture     = "android_llm_capture:_cli"
+android-llm-capture-gui = "android_llm_capture_gui:main"
+
+[project.urls]
+Homepage   = "https://github.com/vdeshmukh203/android-llm-capture"
+Repository = "https://github.com/vdeshmukh203/android-llm-capture"
 
 [tool.setuptools]
-py-modules = ["android_llm_capture"]
+py-modules = ["android_llm_capture", "android_llm_capture_gui"]
