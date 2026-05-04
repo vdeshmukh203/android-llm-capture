@@ -16,12 +16,23 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Software Development :: Testing",
 ]
 
 [project.scripts]
-android-llm-capture = "android_llm_capture:_cli"
+android-llm-capture = "android_llm_capture.cli:main"
 
-[tool.setuptools]
-py-modules = ["android_llm_capture"]
+[project.gui-scripts]
+android-llm-capture-gui = "android_llm_capture.gui:run_gui"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
