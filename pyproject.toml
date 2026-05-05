@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "android-llm-capture"
-version = "0.1.0"
+version = "0.2.0"
 description = "ADB-based tool for capturing LLM API interactions from Android devices"
 readme = "README.md"
 license = {file = "LICENSE"}
@@ -16,12 +16,20 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Software Development :: Testing",
 ]
 
 [project.scripts]
-android-llm-capture = "android_llm_capture:_cli"
+android-llm-capture = "android_llm_capture.cli:main"
 
-[tool.setuptools]
-py-modules = ["android_llm_capture"]
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

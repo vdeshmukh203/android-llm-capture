@@ -2,7 +2,10 @@
 """
 android_llm_capture.py — Android LLM Network Traffic Capture
 Parses Android logcat output to intercept and replay LLM API calls.
-Stdlib-only. No external dependencies.
+Stdlib-only; no external dependencies required.
+
+This file is a self-contained standalone script.  For the installable package
+(which includes the GUI and a clean public API) see src/android_llm_capture/.
 """
 
 from __future__ import annotations
@@ -128,22 +131,19 @@ def parse_logcat_line(line: str, state: Dict) -> Optional[CapturedCall]:
             state["phase"] = "request"
         return None
 
-    # Body accumulation (OkHttp logs body line by line)
+    # Lines during request-body accumulation phase.
+    # The response line (<-- 200 …) is checked first so it is never swallowed.
     if state.get("phase") == "request" and state.get("url"):
-        m_body = _OKHTTP_BODY.search(line)
-        if m_body:
-            state["body_lines"].append(m_body.group("body"))
-        elif line.strip() == "-->":
-            pass  # end marker
-        return None
-
-    # OkHttp response
-    m_resp = _OKHTTP_RESPONSE.search(line)
-    if m_resp and state.get("url"):
-        resp_url = m_resp.group("url")
-        if _detect_provider(resp_url) or resp_url == state.get("url"):
-            state["response_status"] = int(m_resp.group("status"))
-            state["phase"] = "response"
+        m_resp = _OKHTTP_RESPONSE.search(line)
+        if m_resp:
+            resp_url = m_resp.group("url")
+            if _detect_provider(resp_url) or resp_url == state.get("url"):
+                state["response_status"] = int(m_resp.group("status"))
+                state["phase"] = "response"
+        else:
+            m_body = _OKHTTP_BODY.search(line)
+            if m_body:
+                state["body_lines"].append(m_body.group("body"))
         return None
 
     # Response body
@@ -152,6 +152,10 @@ def parse_logcat_line(line: str, state: Dict) -> Optional[CapturedCall]:
         if m_body:
             raw_body = m_body.group("body")
             call = _finalise_call(state, raw_body)
+            state.clear()
+            return call
+        if line.startswith("<-- END") or line == "<--":
+            call = _finalise_call(state, None)
             state.clear()
             return call
 
@@ -404,8 +408,8 @@ def main(argv=None) -> int:
 
 
 
-# Backwards-compatible aliases and helpers
-LLMCapture = CaptureSession
+# Backwards-compatible aliases
+LLMCapture = CaptureSession  # noqa: N816 — keep old capitalisation for compatibility
 
 
 def list_devices() -> list:
