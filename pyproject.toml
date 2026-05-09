@@ -20,8 +20,14 @@ classifiers = [
     "Topic :: Software Development :: Testing",
 ]
 
+[project.optional-dependencies]
+gui = []  # tkinter is bundled with CPython; listed for documentation purposes
+
 [project.scripts]
 android-llm-capture = "android_llm_capture:_cli"
 
 [tool.setuptools]
 py-modules = ["android_llm_capture"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
